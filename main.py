@@ -503,14 +503,34 @@ with tab_planner:
                 "Fraction of Keywords Impacted", 0.0, 1.0, 1.0, 0.05,
                 help="Share of uploaded keywords expected to benefit."
             )
-            with st.expander("Optional: Override NEW keyword destination (advanced)"):
-                st.caption("If your SERP is unusually soft/hard, set a custom destination rank for NEW KWs.")
-                new_kw_target_override = st.number_input(
-                    "Custom Destination Rank for NEW KWs (2–20)", min_value=2.0, max_value=20.0, step=0.5, value=0.0,
-                    help="Leave at 0 to use preset default."
+            with st.expander("Override NEW keyword destination (optional)"):
+                # figure out which forecast preset is in use for this project row
+                current_preset = edited_forecast if 'edited_forecast' in locals() else proj.get('forecast_preset', 'Moderate')
+                current_override = proj.get('new_kw_target_override', None)
+            
+                use_preset_dest_edit = st.checkbox(
+                    "Use preset default destination",
+                    value=(current_override is None),
+                    key=f"use_preset_dest_{idx}",
+                    help="Uncheck to set a custom destination rank for NEW keywords."
                 )
-                if new_kw_target_override == 0.0:
-                    new_kw_target_override = None
+            
+                if use_preset_dest_edit:
+                    new_override = None
+                    st.info(
+                        f"Using preset default: {FORECAST_PRESETS[current_preset]['new_keyword_target']} "
+                        "(destination rank for NEW keywords)."
+                    )
+                else:
+                    new_override = st.number_input(
+                        "Custom Destination Rank for NEW KWs (2–20)",
+                        min_value=2.0, max_value=20.0, step=0.5,
+                        value=float(current_override if current_override is not None
+                                    else FORECAST_PRESETS[current_preset]['new_keyword_target']),
+                        key=f"newkw_{idx}",
+                        help="Pick where NEW keywords should land. This overrides the preset default."
+                    )
+
 
         elif mechanism == "defense":
             sessions_at_risk = st.number_input(
