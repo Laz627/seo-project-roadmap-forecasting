@@ -390,7 +390,7 @@ with tab_roadmap:
         )
 
 # ----------------------------------
-# 🧩 Planner (moved former sidebar settings here)
+# 🧩 Planner (settings + intake)
 # ----------------------------------
 with tab_planner:
     st.header("Planner Settings & Project Intake")
@@ -503,34 +503,26 @@ with tab_planner:
                 "Fraction of Keywords Impacted", 0.0, 1.0, 1.0, 0.05,
                 help="Share of uploaded keywords expected to benefit."
             )
-            with st.expander("Override NEW keyword destination (optional)"):
-                # figure out which forecast preset is in use for this project row
-                current_preset = edited_forecast if 'edited_forecast' in locals() else proj.get('forecast_preset', 'Moderate')
-                current_override = proj.get('new_kw_target_override', None)
-            
-                use_preset_dest_edit = st.checkbox(
-                    "Use preset default destination",
-                    value=(current_override is None),
-                    key=f"use_preset_dest_{idx}",
-                    help="Uncheck to set a custom destination rank for NEW keywords."
+            with st.expander("Optional: Override NEW keyword destination (advanced)"):
+                st.caption("If your SERP is unusually soft/hard, set a custom destination rank for NEW KWs.")
+                use_preset_dest = st.checkbox(
+                    "Use preset default destination (recommended)",
+                    value=True,
+                    help="Uncheck to choose a custom destination rank for NEW keywords."
                 )
-            
-                if use_preset_dest_edit:
-                    new_override = None
+                if use_preset_dest:
+                    new_kw_target_override = None
                     st.info(
-                        f"Using preset default: {FORECAST_PRESETS[current_preset]['new_keyword_target']} "
+                        f"Using preset default: {FORECAST_PRESETS[forecast_preset]['new_keyword_target']} "
                         "(destination rank for NEW keywords)."
                     )
                 else:
-                    new_override = st.number_input(
+                    new_kw_target_override = st.number_input(
                         "Custom Destination Rank for NEW KWs (2–20)",
                         min_value=2.0, max_value=20.0, step=0.5,
-                        value=float(current_override if current_override is not None
-                                    else FORECAST_PRESETS[current_preset]['new_keyword_target']),
-                        key=f"newkw_{idx}",
+                        value=float(FORECAST_PRESETS[forecast_preset]["new_keyword_target"]),
                         help="Pick where NEW keywords should land. This overrides the preset default."
                     )
-
 
         elif mechanism == "defense":
             sessions_at_risk = st.number_input(
@@ -697,22 +689,37 @@ with tab_manage:
                         if mech == "rank_to_ctr":
                             edited_forecast = st.radio(
                                 "Forecast Scenario", options=list(FORECAST_PRESETS.keys()),
-                                index=list(FORECAST_PRESETS.keys()).index(proj['forecast_preset']),
+                                index=list(FORECAST_PRESETS.keys()).index(proj.get('forecast_preset','Moderate')),
                                 horizontal=True, key=f"forecast_{idx}",
                                 help="Existing KWs use tiered gains; NEW KWs jump to a destination."
                             )
                             edited_frac = st.slider("Fraction of Keywords Impacted", 0.0, 1.0,
                                                     value=proj.get('fraction_impacted',1.0), key=f"frac_{idx}")
+                            # --- Override block AFTER edited_forecast is defined ---
                             with st.expander("Override NEW keyword destination (optional)"):
-                                nwt = proj.get('new_kw_target_override', None)
-                                nwt_val = 0.0 if nwt is None else float(nwt)
-                                new_override = st.number_input(
-                                    "Custom Destination Rank for NEW KWs (2–20)", min_value=2.0, max_value=20.0,
-                                    step=0.5, value=nwt_val if nwt_val != 0.0 else 0.0, key=f"newkw_{idx}",
-                                    help="Set to 0 to use preset default."
+                                current_override = proj.get('new_kw_target_override', None)
+                                use_preset_dest_edit = st.checkbox(
+                                    "Use preset default destination",
+                                    value=(current_override is None),
+                                    key=f"use_preset_dest_{idx}",
+                                    help="Uncheck to set a custom destination rank for NEW keywords."
                                 )
-                                if new_override == 0.0:
+                                if use_preset_dest_edit:
                                     new_override = None
+                                    st.info(
+                                        f"Using preset default: {FORECAST_PRESETS[edited_forecast]['new_keyword_target']} "
+                                        "(destination rank for NEW keywords)."
+                                    )
+                                else:
+                                    default_dest = float(FORECAST_PRESETS[edited_forecast]['new_keyword_target'])
+                                    start_val = float(current_override) if current_override is not None else default_dest
+                                    new_override = st.number_input(
+                                        "Custom Destination Rank for NEW KWs (2–20)",
+                                        min_value=2.0, max_value=20.0, step=0.5,
+                                        value=start_val,
+                                        key=f"newkw_{idx}",
+                                        help="Pick where NEW keywords should land. This overrides the preset default."
+                                    )
                         elif mech == "defense":
                             edited_forecast = None
                             edited_frac = proj.get('fraction_impacted', 1.0)
