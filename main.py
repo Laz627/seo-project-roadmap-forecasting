@@ -3,7 +3,6 @@ import pandas as pd
 import altair as alt
 import json
 import math
-import hashlib
 from io import StringIO
 
 # ===============================
@@ -18,8 +17,10 @@ BUCKET_OPTIONS = ["Defense", "BAU", "Core", "Bet"]
 MECHANISMS = {
     "Rank→CTR (Keyword CSV)": "rank_to_ctr",
     "Defense (Protect at-risk traffic)": "defense",
-    "Direct CTR (BAU micro-tweaks)": "direct_ctr"
+    "Direct CTR (BAU micro-tweaks)": "direct_ctr",
+    "Direct Sessions (est.)": "direct_sessions",  # NEW
 }
+FORECAST_PERIODS = {"Monthly": 1, "Quarterly": 3, "Annual": 12}
 
 # Strategic defaults (by bucket)
 CONF_DEFAULTS = {"Defense": 0.80, "BAU": 0.60, "Core": 0.65, "Bet": 0.45}
@@ -94,7 +95,8 @@ def get_ctr_interp(pos: float, curve: dict) -> float:
         return 0.0
     if pos < 1:
         pos = 1.0
-    lo = int(math.floor(pos)); hi = int(math.ceil(pos))
+    import math as _m
+    lo = int(_m.floor(pos)); hi = int(_m.ceil(pos))
     lo = max(1, lo); hi = min(20, hi)
     if lo == hi:
         return curve.get(lo, 0.0)
@@ -126,29 +128,31 @@ def bands_from_p50(p50: float, conf: float, width_cap: float = 0.60):
     p90 = p50 * (1 + width)
     return p10, p50, p90
 
-def _hash_project(proj, curve):
-    key = json.dumps(proj, sort_keys=True) + json.dumps(curve, sort_keys=True)
-    return hashlib.md5(key.encode()).hexdigest()
+def get_period_multiplier(label: str) -> int:
+    return FORECAST_PERIODS.get(label, 12)
 
 # ===============================
 # Core calculations (lead gen)
 # ===============================
 @st.cache_data
-def process_project_calculations(project, curve):
+def process_project_calculations(project: dict, curve: dict):
     """
     Mechanisms:
       - rank_to_ctr: needs kw_data_json (Keyword, Position, Search Volume/Impressions)
       - defense: sessions_at_risk (monthly), prob_of_issue
       - direct_ctr: monthly_impressions, ctr_delta_pp, (optional) fraction_impacted
+      - direct_sessions: monthly_sessions_gain (P50)
 
     Lead-gen funnel:
-      Annual Impact (P50) = Clicks/Visits × Lead CVR × Close Rate × Booking Value × Attribution × 12
+      Impact (P50 for chosen period) = (Monthly Clicks/Visits) × Lead CVR × Close Rate × Booking Value × Attribution × PERIOD_MULT
       Priority (P50) = (Impact P50 × Confidence) / Effort
       P10/P90 bands derived from Confidence.
     """
     mech = project["mechanism"]
     conf = project["confidence"]
     effort = max(project["effort"], 0.01)
+    period_label = project.get("forecast_period", "Annual")
+    mult = get_period_multiplier(period_label)
 
     if mech == "rank_to_ctr":
         kw_df = pd.read_json(StringIO(project['kw_data_json']), orient='split')
@@ -167,6 +171,7 @@ def process_project_calculations(project, curve):
         kw_df['Target CTR']      = kw_df['Target Position'].apply(lambda p: get_ctr_interp(p, curve))
 
         def ctr_delta(row):
+            # No added clicks if already rank 1
             if row['Position'] <= 1.0:
                 return 0.0
             return max(0.0, row['Target CTR'] - row['Current CTR'])
@@ -198,22 +203,29 @@ def process_project_calculations(project, curve):
             "Additional Clicks (monthly)": monthly_clicks
         }])
 
+    elif mech == "direct_sessions":
+        monthly_clicks = float(project.get('monthly_sessions_gain', 0.0))
+        details_df = pd.DataFrame([{
+            "Mechanism": "Direct Sessions (est.)",
+            "Monthly Incremental Sessions (P50)": monthly_clicks
+        }])
+
     else:
         raise ValueError("Unknown mechanism.")
 
-    # Lead-gen funnel → bookings
+    # Lead-gen funnel → bookings for chosen period
     lead_cvr      = project['lead_cvr']
     close_rate    = project['close_rate']
     booking_value = project['booking_value']
     attribution   = project['attribution']
 
-    impact_p50_mo = monthly_clicks * lead_cvr * close_rate * booking_value * attribution
-    impact_p50    = impact_p50_mo * 12  # annualize
-    priority_p50  = (impact_p50 * conf) / effort
-    imp_p10, imp_p50, imp_p90 = bands_from_p50(impact_p50, conf)
+    impact_p50_period = monthly_clicks * lead_cvr * close_rate * booking_value * attribution * mult
+    priority_p50      = (impact_p50_period * conf) / effort
+    imp_p10, imp_p50, imp_p90 = bands_from_p50(impact_p50_period, conf)
     prio_10, prio_50, prio_90 = bands_from_p50(priority_p50, conf)
 
     return {
+        "period_label": period_label,
         "clicks_p50_monthly": monthly_clicks,
         "impact_p10": imp_p10, "impact_p50": imp_p50, "impact_p90": imp_p90,
         "priority_p10": prio_10, "priority_p50": prio_50, "priority_p90": prio_90,
@@ -251,11 +263,13 @@ else:
     for i, proj in enumerate(st.session_state.projects):
         res = process_project_calculations(proj, st.session_state.CTR_CURVE)
         details_cache[i] = res["details_df"]
+        period_lbl = res["period_label"]
         summary_rows.append({
             "Project": proj["name"],
             "Bucket": proj.get("bucket","Core"),
             "Mechanism": proj.get("mechanism","rank_to_ctr"),
             "Forecast": proj.get("forecast_preset","—") if proj.get("mechanism")=="rank_to_ctr" else "—",
+            "Period": period_lbl,
             "Fraction Impacted": proj.get("fraction_impacted", 1.0),
             "Impact P10": res["impact_p10"],
             "Impact P50": res["impact_p50"],
@@ -276,7 +290,7 @@ else:
 
     with tab_dashboard:
         st.subheader("2×2 Priority Matrix (Impact vs Effort)")
-        st.caption("Bubble = project. **Y**: annual booking impact (P50). **X**: effort. Error bars show uncertainty (P10–P90).")
+        st.caption("Bubble = project. **Y**: booking impact (P50) for the project's selected period. **X**: effort. Error bars show uncertainty (P10–P90).")
         dash_num = roadmap_df.copy()
         dash_num["Impact"] = dash_num["Impact P50"]
         dash_num["Impact_low"] = dash_num["Impact P10"]
@@ -286,7 +300,7 @@ else:
             effort_thresh = float(dash_num["Effort"].median())
             points = alt.Chart(dash_num).mark_circle(size=220, opacity=0.85).encode(
                 x=alt.X('Effort:Q', title='Effort (relative units)'),
-                y=alt.Y('Impact:Q', title='Annual Booking Impact (P50)', axis=alt.Axis(format='$,.0f')),
+                y=alt.Y('Impact:Q', title='Booking Impact (P50, project period)', axis=alt.Axis(format='$,.0f')),
                 color=alt.Color('Bucket:N', legend=alt.Legend(title='Bucket')),
                 shape=alt.Shape('Status:N', legend=alt.Legend(title='Status')),
                 tooltip=[
@@ -296,6 +310,7 @@ else:
                     alt.Tooltip('Status:N', title='Status'),
                     alt.Tooltip('Owner:N', title='Owner'),
                     alt.Tooltip('Quarter:N', title='Quarter'),
+                    alt.Tooltip('Period:N', title='Forecast Period'),
                     alt.Tooltip('Effort:Q', title='Effort'),
                     alt.Tooltip('Impact:Q', title='Impact (P50)', format='$,.0f'),
                     alt.Tooltip('Impact_low:Q', title='Impact P10', format='$,.0f'),
@@ -348,7 +363,7 @@ with tab_roadmap:
         st.info("Your roadmap is empty. Add a project in the Planner tab to begin.")
     else:
         st.header("Prioritized SEO Roadmap — Lead Gen")
-        st.caption("Priority = (Annual Booking Impact × Confidence) / Effort. We show **P50** and a **P10–P90** range to make uncertainty explicit.")
+        st.caption("Priority = (Booking Impact × Confidence) / Effort. We show **P50** and a **P10–P90** range. Impact reflects each project's **selected period** (Monthly/Quarterly/Annual).")
         disp = roadmap_df.copy()
         disp["Impact (P50)"] = disp["Impact P50"].apply(lambda x: f"${x:,.0f}")
         disp["Impact Range (P10–P90)"] = disp.apply(lambda r: f"${r['Impact P10']:,.0f}–${r['Impact P90']:,.0f}", axis=1)
@@ -359,7 +374,7 @@ with tab_roadmap:
         disp["Fraction Impacted"] = disp["Fraction Impacted"].apply(lambda x: f"{x:.0%}")
 
         st.dataframe(
-            disp[["Project","Bucket","Mechanism","Forecast","Quarter","Owner","Status","Fraction Impacted",
+            disp[["Project","Bucket","Mechanism","Forecast","Period","Quarter","Owner","Status","Fraction Impacted",
                   "Impact (P50)","Impact Range (P10–P90)","Monthly Addl Clicks (P50)",
                   "Effort","Confidence","Attribution","Priority (P50)"]],
             use_container_width=True
@@ -472,6 +487,14 @@ with tab_planner:
         )
         mechanism = MECHANISMS[mechanism_label]
 
+        # Forecast period per project
+        forecast_period = st.selectbox(
+            "Forecast Period",
+            list(FORECAST_PERIODS.keys()),
+            index=2,  # Annual default
+            help="Choose the time window for the forecast (Monthly = 1 month, Quarterly = 3 months, Annual = 12 months)."
+        )
+
         # Defaults from bucket
         default_conf = CONF_DEFAULTS.get(strategic_bucket, 0.65)
         default_attr = ATTR_DEFAULTS.get(strategic_bucket, 0.70)
@@ -483,6 +506,7 @@ with tab_planner:
         prob_of_issue = None
         monthly_impressions = None
         ctr_delta_pp = None
+        monthly_sessions_gain = None
         new_kw_target_override = None
 
         if mechanism == "rank_to_ctr":
@@ -496,8 +520,7 @@ with tab_planner:
                 help="Existing KWs get tiered rank gains; NEW KWs jump to a destination."
             )
             st.caption(
-                "Preset destinations for NEW KWs: "
-                "Conservative → ~18 (Page 2), Moderate → ~9 (Page 1), Aggressive → ~5 (mid Page 1)."
+                "Preset destinations for NEW KWs: Conservative → ~18 (Page 2), Moderate → ~9 (Page 1), Aggressive → ~5 (mid Page 1)."
             )
             fraction_impacted = st.slider(
                 "Fraction of Keywords Impacted", 0.0, 1.0, 1.0, 0.05,
@@ -526,13 +549,16 @@ with tab_planner:
 
         elif mechanism == "defense":
             sessions_at_risk = st.number_input(
-                "Monthly Sessions at Risk", min_value=0, step=1000,
-                help="Monthly organic sessions that could be lost without this work."
+                "Monthly Sessions at Risk",
+                min_value=0,
+                step=1000,
+                help="Monthly organic sessions that could be lost if the issue occurs (baseline × expected loss %)."
             )
             prob_of_issue = st.slider(
-                "Probability of Issue", 0.0, 1.0, 0.4, 0.05,
-                help="Likelihood of negative impact (e.g., CWV, migration risk)."
-            )
+                "Probability of Issue (%)",
+                0, 100, 40, 5,
+                help="Likelihood that the issue actually occurs during the modeled period."
+            ) / 100.0
 
         elif mechanism == "direct_ctr":
             monthly_impressions = st.number_input(
@@ -546,6 +572,13 @@ with tab_planner:
             fraction_impacted = st.slider(
                 "Fraction of Impressions Impacted", 0.0, 1.0, 1.0, 0.05,
                 help="Share of impressions where the change will take effect."
+            )
+
+        elif mechanism == "direct_sessions":
+            monthly_sessions_gain = st.number_input(
+                "Monthly Incremental Sessions (P50)",
+                min_value=0.0, step=100.0, format="%.0f",
+                help="Best estimate of monthly sessions gained from this change. Confidence sets the uncertainty band."
             )
 
         # Lead-gen funnel inputs
@@ -567,11 +600,11 @@ with tab_planner:
             help="Relative size. Use a consistent scale across projects."
         )
         confidence = st.slider(
-            "Confidence (%)", 0, 100, int(default_conf * 100), 5,
+            "Confidence (%)", 0, 100, int(CONF_DEFAULTS.get(strategic_bucket, 0.65) * 100), 5,
             help="Higher confidence narrows the P10–P90 band and raises Priority."
         ) / 100.0
         attribution = st.slider(
-            "SEO Attribution (%)", 0, 100, int(default_attr * 100), 5,
+            "SEO Attribution (%)", 0, 100, int(ATTR_DEFAULTS.get(strategic_bucket, 0.70) * 100), 5,
             help="Share of bookings credited to SEO (vs. other channels)."
         ) / 100.0
 
@@ -588,12 +621,14 @@ with tab_planner:
                     "name": task_name,
                     "bucket": strategic_bucket,
                     "mechanism": mechanism,
-                    "forecast_preset": forecast_preset,   # only for rank_to_ctr
+                    "forecast_period": forecast_period,          # <-- NEW: period per project
+                    "forecast_preset": forecast_preset,          # only for rank_to_ctr
                     "fraction_impacted": fraction_impacted,
                     "sessions_at_risk": sessions_at_risk,
                     "prob_of_issue": prob_of_issue,
                     "monthly_impressions": monthly_impressions,
                     "ctr_delta_pp": ctr_delta_pp,
+                    "monthly_sessions_gain": monthly_sessions_gain,  # used by direct_sessions
                     "new_kw_target_override": new_kw_target_override,
                     # lead-gen funnel
                     "lead_cvr": lead_cvr,
@@ -608,7 +643,7 @@ with tab_planner:
                     "status": status,
                     # post-launch tracking
                     "actual_clicks_monthly": None,
-                    "actual_revenue_annual": None
+                    "actual_revenue_period": None  # could store actuals matching chosen period
                 }
 
                 if mechanism == "rank_to_ctr":
@@ -644,11 +679,13 @@ with tab_manage:
         for i, proj in enumerate(st.session_state.projects):
             res = process_project_calculations(proj, st.session_state.CTR_CURVE)
             details_cache[i] = res["details_df"]
+            period_lbl = res["period_label"]
             summary_rows.append({
                 "Project": proj["name"],
                 "Bucket": proj.get("bucket","Core"),
                 "Mechanism": proj.get("mechanism","rank_to_ctr"),
                 "Forecast": proj.get("forecast_preset","—") if proj.get("mechanism")=="rank_to_ctr" else "—",
+                "Period": period_lbl,
                 "Fraction Impacted": proj.get("fraction_impacted", 1.0),
                 "Impact P10": res["impact_p10"],
                 "Impact P50": res["impact_p50"],
@@ -686,6 +723,14 @@ with tab_manage:
                         st.text_input("Mechanism", value=label, disabled=True, key=f"mech_{idx}",
                                       help="Mechanism is fixed for this project. Create a new project to change it.")
 
+                        # Forecast period
+                        edited_period = st.selectbox(
+                            "Forecast Period", list(FORECAST_PERIODS.keys()),
+                            index=list(FORECAST_PERIODS.keys()).index(proj.get("forecast_period","Annual")),
+                            key=f"period_{idx}",
+                            help="Choose the time window for this project's forecast."
+                        )
+
                         if mech == "rank_to_ctr":
                             edited_forecast = st.radio(
                                 "Forecast Scenario", options=list(FORECAST_PRESETS.keys()),
@@ -695,7 +740,7 @@ with tab_manage:
                             )
                             edited_frac = st.slider("Fraction of Keywords Impacted", 0.0, 1.0,
                                                     value=proj.get('fraction_impacted',1.0), key=f"frac_{idx}")
-                            # --- Override block AFTER edited_forecast is defined ---
+                            # Override NEW keyword destination (optional)
                             with st.expander("Override NEW keyword destination (optional)"):
                                 current_override = proj.get('new_kw_target_override', None)
                                 use_preset_dest_edit = st.checkbox(
@@ -724,13 +769,19 @@ with tab_manage:
                             edited_forecast = None
                             edited_frac = proj.get('fraction_impacted', 1.0)
                             cda, cdb = st.columns(2)
-                            sessions_at_risk = cda.number_input("Monthly Sessions at Risk",
-                                                                value=int(proj.get('sessions_at_risk') or 0),
-                                                                min_value=0, step=1000, key=f"sar_{idx}")
-                            prob_of_issue = cdb.slider("Probability of Issue", 0.0, 1.0,
-                                                       value=float(proj.get('prob_of_issue') or 0.4),
-                                                       key=f"poi_{idx}")
+                            sessions_at_risk = cda.number_input(
+                                "Monthly Sessions at Risk",
+                                value=int(proj.get('sessions_at_risk') or 0),
+                                min_value=0, step=1000, key=f"sar_{idx}"
+                            )
+                            prob_pct_default = int(round(float(proj.get('prob_of_issue') or 0.4) * 100))
+                            prob_of_issue = cdb.slider(
+                                "Probability of Issue (%)",
+                                0, 100, prob_pct_default, 5, key=f"poi_pct_{idx}",
+                                help="Likelihood that the issue occurs during the modeled period."
+                            ) / 100.0
                             new_override = proj.get('new_kw_target_override', None)
+
                         elif mech == "direct_ctr":
                             edited_forecast = None
                             cda, cdb, cdc = st.columns(3)
@@ -742,6 +793,17 @@ with tab_manage:
                                                             min_value=0.0, step=0.05, format="%.2f", key=f"pp_{idx}")
                             edited_frac = cdc.slider("Fraction of Impressions Impacted", 0.0, 1.0,
                                                      value=proj.get('fraction_impacted',1.0), key=f"frac2_{idx}")
+                            new_override = proj.get('new_kw_target_override', None)
+
+                        elif mech == "direct_sessions":
+                            edited_forecast = None
+                            edited_frac = proj.get('fraction_impacted', 1.0)  # not used but kept consistent
+                            monthly_sessions_gain = st.number_input(
+                                "Monthly Incremental Sessions (P50)",
+                                value=float(proj.get('monthly_sessions_gain') or 0.0),
+                                min_value=0.0, step=100.0, format="%.0f", key=f"sessions_gain_{idx}",
+                                help="Best estimate of monthly sessions gained from this change."
+                            )
                             new_override = proj.get('new_kw_target_override', None)
 
                         # Lead-gen + planning
@@ -769,23 +831,24 @@ with tab_manage:
                                                      key=f"status_{idx}")
                         edited_owner = st.text_input("Owner / Team", value=proj.get('owner',""), key=f"owner_{idx}")
 
-                        # Actuals if completed
+                        # Actuals if completed (optional)
                         if edited_status == "Completed":
                             a1, a2 = st.columns(2)
-                            edited_actual_clicks = a1.number_input("Actual Monthly Clicks/Visits Gained (or Saved)",
+                            edited_actual_clicks = a1.number_input("Actual Monthly Clicks/Visits (or Saved)",
                                                                    value=float(proj.get('actual_clicks_monthly') or 0),
                                                                    min_value=0.0, step=1.0, key=f"act_clicks_{idx}")
-                            edited_actual_rev = a2.number_input("Actual Annual Bookings ($)",
-                                                                value=float(proj.get('actual_revenue_annual') or 0),
+                            edited_actual_rev = a2.number_input(f"Actual {proj.get('forecast_period','Annual')} Bookings ($)",
+                                                                value=float(proj.get('actual_revenue_period') or 0),
                                                                 min_value=0.0, step=100.0, key=f"act_rev_{idx}")
                         else:
                             edited_actual_clicks = proj.get('actual_clicks_monthly')
-                            edited_actual_rev = proj.get('actual_revenue_annual')
+                            edited_actual_rev = proj.get('actual_revenue_period')
 
                         update_button = st.form_submit_button("Update Project")
                         if update_button:
                             proj['name'] = edited_name
                             proj['bucket'] = edited_bucket
+                            proj['forecast_period'] = edited_period
                             proj['confidence'] = edited_conf
                             proj['attribution'] = edited_attr
                             proj['target_quarter'] = edited_qtr
@@ -797,7 +860,7 @@ with tab_manage:
                             proj['effort'] = edited_effort
                             proj['fraction_impacted'] = edited_frac
                             proj['actual_clicks_monthly'] = edited_actual_clicks
-                            proj['actual_revenue_annual'] = edited_actual_rev
+                            proj['actual_revenue_period'] = edited_actual_rev
 
                             if mech == "rank_to_ctr":
                                 proj['forecast_preset'] = edited_forecast
@@ -808,6 +871,9 @@ with tab_manage:
                             elif mech == "direct_ctr":
                                 proj['monthly_impressions'] = monthly_impressions
                                 proj['ctr_delta_pp'] = ctr_delta_pp
+                            elif mech == "direct_sessions":
+                                proj['monthly_sessions_gain'] = monthly_sessions_gain
+
                             st.experimental_rerun()
 
                 with col2:
