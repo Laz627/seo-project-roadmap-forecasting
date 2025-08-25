@@ -470,212 +470,201 @@ with tab_planner:
 
     st.markdown("---")
 
-    # --- Add New Project Form ---
+    # --- Add New Project (live-updating selectors + form submit) ---
     st.subheader("Add New Project")
-    with st.form("new_project_form", clear_on_submit=True):
-        # --- Basics ---
-        task_name = st.text_input(
-            "Project Name", placeholder="e.g., Improve 'Solutions' hub IA",
-            help="Action-oriented name that reads well on a slide."
+    
+    # 1) Live-updating selectors (outside the form so UI below changes immediately)
+    task_name = st.text_input(
+        "Project Name", placeholder="e.g., Improve 'Solutions' hub IA",
+        help="Action-oriented name that reads well on a slide.", key="planner_name"
+    )
+    strategic_bucket = st.selectbox(
+        "Strategic Bucket", BUCKET_OPTIONS, index=2, key="planner_bucket",
+        help="🛡️ Defense=protect revenue • ⚙️ BAU=routine gains • 🌱 Core=main growth • 🎯 Bet=high risk/high reward"
+    )
+    mechanism_label = st.selectbox(
+        "Mechanism", list(MECHANISMS.keys()), key="planner_mech",
+        help="Pick how this creates value so we show the right inputs & math."
+    )
+    mechanism = MECHANISMS[mechanism_label]
+    forecast_period = st.selectbox(
+        "Forecast Period", list(FORECAST_PERIODS.keys()), index=2, key="planner_period",
+        help="Choose the time window for the forecast (Monthly=1, Quarterly=3, Annual=12 months)."
+    )
+    
+    st.markdown("### Mechanism-specific inputs")
+    st.caption(f"Selected: **{mechanism_label}**")
+    
+    # 2) Initialize variables so they exist regardless of branch
+    forecast_preset = None
+    fraction_impacted = 1.0
+    sessions_at_risk = None
+    prob_of_issue = None
+    monthly_impressions = None
+    ctr_delta_pp = None
+    monthly_sessions_gain = None
+    new_kw_target_override = None
+    uploaded_kw = None
+    
+    # 3) Show the correct inputs LIVE (outside form)
+    if mechanism == "rank_to_ctr":
+        uploaded_kw = st.file_uploader(
+            "Upload Keyword List (CSV)",
+            type=["csv"],
+            help="Columns required: Keyword, Position, and Search Volume (or Impressions).",
+            key="planner_kw_csv"
         )
-        strategic_bucket = st.selectbox(
-            "Strategic Bucket", BUCKET_OPTIONS, index=2,
-            help="🛡️ Defense=protect revenue • ⚙️ BAU=routine gains • 🌱 Core=main growth • 🎯 Bet=high risk/high reward"
+        forecast_preset = st.radio(
+            "Forecast Scenario", options=list(FORECAST_PRESETS.keys()), horizontal=True, key="planner_preset",
+            help="Existing KWs get tiered rank gains; NEW KWs jump to a destination rank."
         )
-        mechanism_label = st.selectbox(
-            "Mechanism", list(MECHANISMS.keys()),
-            help="Pick how this creates value so we show the right inputs & math."
+        st.caption(
+            "Preset destinations for NEW KWs → Conservative ≈ **18** (Page 2), Moderate ≈ **9** (Page 1), Aggressive ≈ **5** (mid Page 1)."
         )
-        mechanism = MECHANISMS[mechanism_label]
-    
-        # Forecast period per project
-        forecast_period = st.selectbox(
-            "Forecast Period",
-            list(FORECAST_PERIODS.keys()),
-            index=2,  # Annual default
-            help="Choose the time window for the forecast (Monthly=1, Quarterly=3, Annual=12 months)."
+        fraction_impacted = st.slider(
+            "Fraction of Keywords Impacted", 0.0, 1.0, 1.0, 0.05, key="planner_frac",
+            help="Share of uploaded keywords expected to benefit."
         )
-    
-        # Bucket-based defaults
-        default_conf = CONF_DEFAULTS.get(strategic_bucket, 0.65)
-        default_attr = ATTR_DEFAULTS.get(strategic_bucket, 0.70)
-    
-        st.markdown("### Mechanism-specific inputs")
-        st.caption(f"Selected: **{mechanism_label}**")
-    
-        # Initialize all optional vars so they're always defined
-        forecast_preset = None
-        fraction_impacted = 1.0
-        sessions_at_risk = None
-        prob_of_issue = None
-        monthly_impressions = None
-        ctr_delta_pp = None
-        monthly_sessions_gain = None
-        new_kw_target_override = None
-        uploaded_kw = None  # define here to avoid NameError when saving
-    
-        # ---------- Mechanism branches ----------
-        if mechanism == "rank_to_ctr":
-            uploaded_kw = st.file_uploader(
-                "Upload Keyword List (CSV)",
-                type=["csv"],
-                help="Columns required: Keyword, Position, and Search Volume (or Impressions)."
+        with st.expander("Optional: Override NEW keyword destination"):
+            use_preset_dest = st.checkbox(
+                "Use preset default destination (recommended)", value=True, key="planner_use_preset_dest",
+                help="Uncheck to choose a custom destination rank for NEW keywords."
             )
-            forecast_preset = st.radio(
-                "Forecast Scenario", options=list(FORECAST_PRESETS.keys()), horizontal=True,
-                help="Existing KWs get tiered rank gains; NEW KWs jump to a destination rank."
-            )
-            st.caption(
-                "Preset destinations for NEW KWs → Conservative ≈ **18** (Page 2), Moderate ≈ **9** (Page 1), Aggressive ≈ **5** (mid Page 1)."
-            )
-            fraction_impacted = st.slider(
-                "Fraction of Keywords Impacted", 0.0, 1.0, 1.0, 0.05,
-                help="Share of uploaded keywords expected to benefit."
-            )
-            with st.expander("Optional: Override NEW keyword destination"):
-                st.caption("If your SERP is unusually soft/hard, set a custom destination rank for NEW KWs.")
-                use_preset_dest = st.checkbox(
-                    "Use preset default destination (recommended)",
-                    value=True,
-                    help="Uncheck to choose a custom destination rank for NEW keywords."
+            if use_preset_dest:
+                new_kw_target_override = None
+                st.info(
+                    f"Using preset default: {FORECAST_PRESETS.get(st.session_state.get('planner_preset','Moderate'),'').get('new_keyword_target',9)} "
+                    "(destination rank for NEW keywords)."
                 )
-                if use_preset_dest:
-                    new_kw_target_override = None
-                    st.info(
-                        f"Using preset default: {FORECAST_PRESETS[forecast_preset]['new_keyword_target']} "
-                        "(destination rank for NEW keywords)."
-                    )
-                else:
-                    new_kw_target_override = st.number_input(
-                        "Custom Destination Rank for NEW KWs (2–20)",
-                        min_value=2.0, max_value=20.0, step=0.5,
-                        value=float(FORECAST_PRESETS[forecast_preset]["new_keyword_target"]),
-                        help="Pick where NEW keywords should land. Overrides the preset default."
-                    )
-    
-        elif mechanism == "defense":
-            sessions_at_risk = st.number_input(
-                "Monthly Sessions at Risk",
-                min_value=0,
-                step=1000,
-                help="Monthly organic sessions that could be lost if the issue occurs (baseline × expected loss %)."
-            )
-            prob_of_issue = st.slider(
-                "Probability of Issue (%)",
-                0, 100, 40, 5,
-                help="Likelihood that the issue occurs during the modeled period."
-            ) / 100.0
-    
-        elif mechanism == "direct_ctr":
-            monthly_impressions = st.number_input(
-                "Monthly Impressions", min_value=0, step=1000,
-                help="Impressions across the affected pages/cluster."
-            )
-            ctr_delta_pp = st.number_input(
-                "Estimated CTR Increase (percentage points)", min_value=0.0, step=0.05, format="%.2f",
-                help="Example: +0.30 pp for an H3→H2 cleanup or snippet improvement."
-            )
-            fraction_impacted = st.slider(
-                "Fraction of Impressions Impacted", 0.0, 1.0, 1.0, 0.05,
-                help="Share of impressions where the change will take effect."
-            )
-    
-        elif mechanism == "direct_sessions":
-            monthly_sessions_gain = st.number_input(
-                "Monthly Incremental Sessions (P50)",
-                min_value=0.0, step=100.0, format="%.0f",
-                help="Best estimate of monthly sessions gained from this change. Confidence sets the uncertainty band."
-            )
-    
-        st.markdown("### Lead-gen funnel & planning")
-    
-        # Lead-gen funnel inputs
-        lead_cvr = st.number_input(
-            "Lead Form Conversion Rate (%)", min_value=0.0, step=0.1, format="%.2f",
-            help="Percent of incremental visits that submit a lead form."
-        ) / 100.0
-        close_rate = st.number_input(
-            "Sales Close Rate (%)", min_value=0.0, step=0.1, format="%.2f",
-            help="Percent of leads that become closed/won deals."
-        ) / 100.0
-        booking_value = st.number_input(
-            "Avg Booking Value ($)", min_value=0, step=100,
-            help="Average contract value (ACV) per closed/won deal."
-        )
-    
-        effort = st.number_input(
-            "Effort (Points)", min_value=1, step=1,
-            help="Relative size. Use a consistent scale across projects."
-        )
-        confidence = st.slider(
-            "Confidence (%)", 0, 100, int(default_conf * 100), 5,
-            help="Higher confidence narrows the P10–P90 band and raises Priority."
-        ) / 100.0
-        attribution = st.slider(
-            "SEO Attribution (%)", 0, 100, int(default_attr * 100), 5,
-            help="Share of bookings credited to SEO (vs. other channels)."
-        ) / 100.0
-    
-        target_qtr = st.selectbox("Target Quarter", ["Unassigned", "Q1", "Q2", "Q3", "Q4"], help="When we plan to do the work.")
-        owner = st.text_input("Owner / Team", value="", help="Primary owner or team.")
-        status = st.selectbox("Status", ["Backlog", "In Progress", "Completed", "On Hold"], help="Lightweight tracking.")
-    
-        add_button = st.form_submit_button("Add Project to Roadmap")
-        if add_button:
-            if not task_name:
-                st.error("Project Name is required.")
-            elif mechanism == "rank_to_ctr" and uploaded_kw is None:
-                st.error("Please upload a keyword CSV for Rank→CTR.")
             else:
-                # Build project object
-                new_project = {
-                    "name": task_name,
-                    "bucket": strategic_bucket,
-                    "mechanism": mechanism,
-                    "forecast_period": forecast_period,
-                    "forecast_preset": forecast_preset,         # only for rank_to_ctr
-                    "fraction_impacted": fraction_impacted,
-                    "sessions_at_risk": sessions_at_risk,
-                    "prob_of_issue": prob_of_issue,
-                    "monthly_impressions": monthly_impressions,
-                    "ctr_delta_pp": ctr_delta_pp,
-                    "monthly_sessions_gain": monthly_sessions_gain,  # used by direct_sessions
-                    "new_kw_target_override": new_kw_target_override,
-                    # lead-gen funnel
-                    "lead_cvr": lead_cvr,
-                    "close_rate": close_rate,
-                    "booking_value": booking_value,
-                    # business & planning
-                    "effort": effort,
-                    "confidence": confidence,
-                    "attribution": attribution,
-                    "target_quarter": target_qtr,
-                    "owner": owner,
-                    "status": status,
-                    # post-launch tracking
-                    "actual_clicks_monthly": None,
-                    "actual_revenue_period": None
-                }
+                # pick a safe default based on current preset selection
+                _preset = st.session_state.get('planner_preset','Moderate')
+                new_kw_target_override = st.number_input(
+                    "Custom Destination Rank for NEW KWs (2–20)",
+                    min_value=2.0, max_value=20.0, step=0.5,
+                    value=float(FORECAST_PRESETS[_preset]["new_keyword_target"]),
+                    key="planner_new_kw_target",
+                    help="Pick where NEW keywords should land. Overrides the preset default."
+                )
     
-                # Attach KW data if needed
-                if mechanism == "rank_to_ctr":
-                    kw_df = pd.read_csv(uploaded_kw)
-                    kw_df.columns = [c.strip() for c in kw_df.columns]
-                    if 'Search Volume' not in kw_df.columns and 'Impressions' in kw_df.columns:
-                        kw_df = kw_df.rename(columns={'Impressions': 'Search Volume'})
-                    required = {'Keyword', 'Position', 'Search Volume'}
-                    if not required.issubset(set(kw_df.columns)):
-                        st.error("CSV must include: Keyword, Position, and Search Volume (or Impressions).")
-                        st.stop()
-                    kw_df['Position'] = pd.to_numeric(kw_df['Position'], errors='coerce')
-                    kw_df['Search Volume'] = pd.to_numeric(kw_df['Search Volume'], errors='coerce')
-                    kw_df = kw_df.dropna(subset=['Position', 'Search Volume'])
-                    new_project["kw_data_json"] = kw_df.to_json(orient='split')
+    elif mechanism == "defense":
+        sessions_at_risk = st.number_input(
+            "Monthly Sessions at Risk",
+            min_value=0, step=1000, key="planner_sar",
+            help="Monthly organic sessions that could be lost if the issue occurs (baseline × expected loss %)."
+        )
+        prob_of_issue = st.slider(
+            "Probability of Issue (%)",
+            0, 100, 40, 5, key="planner_prob",
+            help="Likelihood that the issue occurs during the modeled period."
+        ) / 100.0
     
-                st.session_state.projects.append(new_project)
-                st.success(f"Added '{task_name}'")
-                st.experimental_rerun()
-
+    elif mechanism == "direct_ctr":
+        monthly_impressions = st.number_input(
+            "Monthly Impressions", min_value=0, step=1000, key="planner_imps",
+            help="Impressions across the affected pages/cluster."
+        )
+        ctr_delta_pp = st.number_input(
+            "Estimated CTR Increase (percentage points)", min_value=0.0, step=0.05, format="%.2f",
+            key="planner_pp",
+            help="Example: +0.30 pp for an H3→H2 cleanup or snippet improvement."
+        )
+        fraction_impacted = st.slider(
+            "Fraction of Impressions Impacted", 0.0, 1.0, 1.0, 0.05, key="planner_frac_ctr",
+            help="Share of impressions where the change will take effect."
+        )
+    
+    elif mechanism == "direct_sessions":
+        monthly_sessions_gain = st.number_input(
+            "Monthly Incremental Sessions (P50)",
+            min_value=0.0, step=100.0, format="%.0f", key="planner_sessions_gain",
+            help="Best estimate of monthly sessions gained from this change. Confidence sets the uncertainty band."
+        )
+    
+    st.markdown("### Lead-gen funnel & planning")
+    # 4) Lead-gen + planning (also outside the form so they update immediately)
+    default_conf = CONF_DEFAULTS.get(strategic_bucket, 0.65)
+    default_attr = ATTR_DEFAULTS.get(strategic_bucket, 0.70)
+    
+    lead_cvr = st.number_input(
+        "Lead Form Conversion Rate (%)", min_value=0.0, step=0.1, format="%.2f", key="planner_leadcvr",
+        help="Percent of incremental visits that submit a lead form."
+    ) / 100.0
+    close_rate = st.number_input(
+        "Sales Close Rate (%)", min_value=0.0, step=0.1, format="%.2f", key="planner_close",
+        help="Percent of leads that become closed/won deals."
+    ) / 100.0
+    booking_value = st.number_input(
+        "Avg Booking Value ($)", min_value=0, step=100, key="planner_booking",
+        help="Average contract value (ACV) per closed/won deal."
+    )
+    
+    effort = st.number_input("Effort (Points)", min_value=1, step=1, key="planner_effort",
+                             help="Relative size. Use a consistent scale across projects.")
+    confidence = st.slider("Confidence (%)", 0, 100, int(default_conf*100), 5, key="planner_conf",
+                           help="Higher confidence narrows the P10–P90 band and raises Priority.") / 100.0
+    attribution = st.slider("SEO Attribution (%)", 0, 100, int(default_attr*100), 5, key="planner_attr",
+                            help="Share of bookings credited to SEO (vs. other channels).") / 100.0
+    
+    target_qtr = st.selectbox("Target Quarter", ["Unassigned","Q1","Q2","Q3","Q4"], key="planner_qtr",
+                              help="When we plan to do the work.")
+    owner = st.text_input("Owner / Team", value="", key="planner_owner", help="Primary owner or team.")
+    status = st.selectbox("Status", ["Backlog","In Progress","Completed","On Hold"], key="planner_status",
+                          help="Lightweight tracking.")
+    
+    # 5) Single submit button that reads all current widget values
+    if st.button("Add Project to Roadmap", type="primary", use_container_width=False):
+        if not task_name:
+            st.error("Project Name is required.")
+        elif mechanism == "rank_to_ctr" and uploaded_kw is None:
+            st.error("Please upload a keyword CSV for Rank→CTR.")
+        else:
+            new_project = {
+                "name": task_name,
+                "bucket": strategic_bucket,
+                "mechanism": mechanism,
+                "forecast_period": forecast_period,
+                "forecast_preset": forecast_preset,
+                "fraction_impacted": fraction_impacted,
+                "sessions_at_risk": sessions_at_risk,
+                "prob_of_issue": prob_of_issue,
+                "monthly_impressions": monthly_impressions,
+                "ctr_delta_pp": ctr_delta_pp,
+                "monthly_sessions_gain": monthly_sessions_gain,
+                "new_kw_target_override": new_kw_target_override,
+                # lead-gen funnel
+                "lead_cvr": lead_cvr,
+                "close_rate": close_rate,
+                "booking_value": booking_value,
+                # business & planning
+                "effort": effort,
+                "confidence": confidence,
+                "attribution": attribution,
+                "target_quarter": target_qtr,
+                "owner": owner,
+                "status": status,
+                # post-launch tracking
+                "actual_clicks_monthly": None,
+                "actual_revenue_period": None
+            }
+    
+            if mechanism == "rank_to_ctr":
+                kw_df = pd.read_csv(uploaded_kw)
+                kw_df.columns = [c.strip() for c in kw_df.columns]
+                if 'Search Volume' not in kw_df.columns and 'Impressions' in kw_df.columns:
+                    kw_df = kw_df.rename(columns={'Impressions':'Search Volume'})
+                required = {'Keyword','Position','Search Volume'}
+                if not required.issubset(set(kw_df.columns)):
+                    st.error("CSV must include: Keyword, Position, and Search Volume (or Impressions).")
+                    st.stop()
+                kw_df['Position'] = pd.to_numeric(kw_df['Position'], errors='coerce')
+                kw_df['Search Volume'] = pd.to_numeric(kw_df['Search Volume'], errors='coerce')
+                kw_df = kw_df.dropna(subset=['Position','Search Volume'])
+                new_project["kw_data_json"] = kw_df.to_json(orient='split')
+    
+            st.session_state.projects.append(new_project)
+            st.success(f"Added '{task_name}'")
+            st.experimental_rerun()
 
 # ----------------------------------
 # 🛠️ Manage & Edit
